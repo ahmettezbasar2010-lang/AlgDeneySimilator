@@ -5,8 +5,8 @@ import io
 import json
 import base64
 import html as hx
+import tempfile
 import unicodedata
-import tempfilegit --version
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -56,7 +56,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# DİL VE AYARLAR (sağ üst)
+# DİL VE AYARLAR
 # ============================================================
 LANG = "tr"
 
@@ -206,7 +206,7 @@ LIGHTS = ["Kırmızı/Mavi LED", "Turuncu/Kırmızı", "Beyaz/Gün Işığı", "
           "Yüksek Yoğunluk", "Dengeli PAR LED", "Yeşil/Sarı", "Mavi-Kırmızı"]
 IMG_DIR = "algler_gorseller"
 HUMAN_O2_NEED = 780.0
-AI_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5")
+AI_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5")
 DEF_NOT = "Parametreler yaklaşık literatür değerleridir; kendi türünüz için deneysel doğrulama yapın."
 DEF_NOT_EN = "Parameters are approximate literature values; validate experimentally for your own strain."
 
@@ -238,7 +238,6 @@ def guv(g):
     return pair[1] if LANG == "en" else pair[0]
 
 
-# Türkçe / yaygın yazımları PubChem'in anlayacağı İngilizce adlara çevirir
 TR_ALIAS = {
     "glikoz": "glucose", "glukoz": "glucose", "dekstroz": "dextrose", "sakkaroz": "sucrose",
     "tuz": "sodium chloride", "sodyum klorür": "sodium chloride", "potasyum klorür": "potassium chloride",
@@ -258,7 +257,6 @@ TR_ALIAS = {
     "glisin": "glycine",
 }
 
-# Deneylerde en sık kullanılan 50 madde: (Türkçe ad, İngilizce ad, formül, molekül ağırlığı g/mol)
 PRESETS = [
     ("Sodyum nitrat", "Sodium nitrate", "NaNO3", 84.99),
     ("Potasyum nitrat", "Potassium nitrate", "KNO3", 101.10),
@@ -311,7 +309,6 @@ PRESETS = [
     ("Etanol", "Ethanol", "C2H6O", 46.07),
     ("Askorbik asit (C vitamini)", "Ascorbic acid", "C6H8O6", 176.12),
 ]
-assert len(PRESETS) == 50
 
 # ============================================================
 # ARAŞTIRILMIŞ ETKİ TABLOSU (genel literatür özeti, basitleştirilmiş)
@@ -435,15 +432,16 @@ for _e in KNOWN:
     _e.setdefault("not", DEF_NOT)
     _e.setdefault("not_en", DEF_NOT_EN)
 
-KNOWN_INDEX = {}
-for _e in KNOWN:
-    for _a in _e["aliases"]:
-        KNOWN_INDEX[re.sub(r"[^a-z0-9]", "", unicodedata.normalize("NFKD", _a).encode("ascii", "ignore").decode().lower())] = _e
-
 
 def nkey(s):
     t = unicodedata.normalize("NFKD", str(s)).encode("ascii", "ignore").decode().lower()
     return re.sub(r"[^a-z0-9]", "", t)
+
+
+KNOWN_INDEX = {}
+for _e in KNOWN:
+    for _a in _e["aliases"]:
+        KNOWN_INDEX[nkey(_a)] = _e
 
 
 def known_factor(e, conc, alg):
@@ -462,6 +460,19 @@ def known_factor(e, conc, alg):
     if t == "mikro":
         return (1 + 0.2 * conc / (conc + 0.05)) / (1 + (conc / 50) ** 2)
     return 1.0
+
+
+# ============================================================
+# API ANAHTARI (yerelde ortam değişkeni, bulutta Streamlit secrets)
+# ============================================================
+def get_api_key():
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not key:
+        try:
+            key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            key = ""
+    return key
 
 
 # ============================================================
@@ -497,9 +508,9 @@ SCHEMA_TR = ('{"etki": "artirici | engelleyici | notr | toksik", '
 
 @st.cache_data(show_spinner=False, ttl=600)
 def ai_predict(alg, group, name, formul, mw, conc, lang):
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    key = get_api_key()
     if not key:
-        return {"hata": "ANTHROPIC_API_KEY tanımlı değil"}
+        return {"hata": "API anahtarı tanımlı değil"}
     ans = "English" if lang == "en" else "Türkçe"
     prompt = (
         "Sen alg biyoteknolojisi uzmanısın. Aşağıdaki fotobiyoreaktörde yetiştirilen mikroalg/siyanobakteri "
@@ -566,7 +577,7 @@ def evaluate(it, alg, info):
         f = known_factor(entry, float(it["mgL"]), alg)
         return {"kaynak": "lit", "carpan": f, "ozet": tx(entry["ozet"], entry["ozet_en"]),
                 "guven": "orta", "uyari": tx(entry["not"], entry["not_en"])}
-    if os.environ.get("ANTHROPIC_API_KEY"):
+    if get_api_key():
         ai = ai_predict(alg, info["grup"], it["ad"], it["formul"], it["mw"], float(it["mgL"]), LANG)
         if "carpan" in ai:
             return {"kaynak": "ai", "carpan": ai["carpan"], "ozet": ai.get("aciklama", ""),
@@ -640,7 +651,7 @@ def recommendations(info, volume, temp, light, tf, lf, o2, fa, items, evals):
 
 
 # ============================================================
-# ALG SEÇİCİ (hover önizlemeli, tooltip ana sayfada gösterilir)
+# ALG SEÇİCİ BİLEŞENİ (hover önizlemeli)
 # ============================================================
 PICKER_HTML = r"""
 <!DOCTYPE html>
@@ -746,16 +757,11 @@ send("streamlit:setFrameHeight", {height: 252});
 </body></html>
 """
 
-PICKER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_alg_picker")
+# Bulutta proje klasörüne yazmak yerine geçici klasör kullanılır
+PICKER_DIR = os.path.join(tempfile.gettempdir(), "uzay_alg_picker")
 os.makedirs(PICKER_DIR, exist_ok=True)
-_idx_path = os.path.join(PICKER_DIR, "index.html")
-_old_html = None
-if os.path.exists(_idx_path):
-    with open(_idx_path, encoding="utf-8") as _f:
-        _old_html = _f.read()
-if _old_html != PICKER_HTML:
-    with open(_idx_path, "w", encoding="utf-8") as _f:
-        _f.write(PICKER_HTML)
+with open(os.path.join(PICKER_DIR, "index.html"), "w", encoding="utf-8") as _f:
+    _f.write(PICKER_HTML)
 
 _alg_picker_component = components.declare_component("alg_picker", path=PICKER_DIR)
 
@@ -767,7 +773,7 @@ def alg_picker(names, active, key, height=240, vol=0):
 
 
 # ============================================================
-# GÖRSEL VE YARDIMCI FONKSİYONLAR
+# YARDIMCI FONKSİYONLAR
 # ============================================================
 def qp_get(key, default):
     try:
@@ -938,7 +944,7 @@ if "sel" not in st.session_state:
     st.session_state.sel = alg_default
 
 # ============================================================
-# YAN MENÜ: ALG, ORTAM VE MADDE EKLEME
+# YAN MENÜ
 # ============================================================
 with st.sidebar:
     st.markdown(f"### {tx('Reaktör Konsolu', 'Reactor Console')}")
@@ -1034,6 +1040,7 @@ VIEW_LABELS = [tx("Canlı Simülasyon & Endüstriyel Reaktör", "Live Simulation
 view_default = 1 if qp_get("gorunum", "") == "ansiklopedi" else 0
 view_idx = st.radio(tx("Görünüm", "View"), [0, 1], format_func=lambda i: VIEW_LABELS[i],
                     index=view_default, horizontal=True, label_visibility="collapsed", key="view_sel")
+
 
 # ============================================================
 # 3B MODEL
